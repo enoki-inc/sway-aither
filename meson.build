@@ -259,6 +259,7 @@ if get_option('default-wallpaper')
 		'assets/Sway_Wallpaper_Blue_2048x1536.png',
 		'assets/Sway_Wallpaper_Blue_2048x1536_Portrait.png',
 		'assets/aither_1920x1080.png',
+		'assets/Bibata-Cursors',
 	)
 	wallpaper_install_dir = join_paths(datadir, 'backgrounds', 'sway')
 
