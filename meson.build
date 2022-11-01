@@ -257,8 +257,6 @@ if get_option('default-wallpaper')
 
 	install_data(wallpaper_files, install_dir: wallpaper_install_dir)
 	
-	install_subdir('assets/Bibata-Cursors', install_dir : 'share/icons', strip_directory : true)
-
 endif
 
 if get_option('zsh-completions')
