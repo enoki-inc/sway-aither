@@ -102,7 +102,8 @@ struct sway_view {
 	struct wl_listener foreign_fullscreen_request;
 	struct wl_listener foreign_close_request;
 	struct wl_listener foreign_destroy;
-
+	struct wl_listener foreign_minimize;
+	
 	bool destroying;
 
 	list_t *executed_criteria; // struct criteria *

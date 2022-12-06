@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include <stdio.h>
 #include <assert.h>
 #include <GLES2/gl2.h>
 #include <stdlib.h>
@@ -17,6 +18,7 @@
 #include "log.h"
 #include "config.h"
 #include "sway/config.h"
+#include "sway/desktop/fx_renderer.h"
 #include "sway/input/input-manager.h"
 #include "sway/input/seat.h"
 #include "sway/layers.h"
@@ -32,7 +34,17 @@ struct render_data {
 	pixman_region32_t *damage;
 	float alpha;
 	struct wlr_box *clip_box;
+	struct decoration_data deco_data;
 };
+
+struct decoration_data get_undecorated_decoration_data() {
+	return (struct decoration_data) {
+		.alpha = 1.0f,
+		.corner_radius = 0,
+		.saturation = 1.0f,
+		.has_titlebar = false,
+	};
+}
 
 /**
  * Apply scale to a width or height.
@@ -52,7 +64,8 @@ static int scale_length(int length, int offset, float scale) {
 
 static void scissor_output(struct wlr_output *wlr_output,
 		pixman_box32_t *rect) {
-	struct wlr_renderer *renderer = wlr_output->renderer;
+	struct sway_output *output = wlr_output->data;
+	struct fx_renderer *renderer = output->server->renderer;
 	assert(renderer);
 
 	struct wlr_box box = {
@@ -69,7 +82,7 @@ static void scissor_output(struct wlr_output *wlr_output,
 		wlr_output_transform_invert(wlr_output->transform);
 	wlr_box_transform(&box, &box, transform, ow, oh);
 
-	wlr_renderer_scissor(renderer, &box);
+	fx_renderer_scissor(&box);
 }
 
 static void set_scale_filter(struct wlr_output *wlr_output,
@@ -99,9 +112,9 @@ static void set_scale_filter(struct wlr_output *wlr_output,
 static void render_texture(struct wlr_output *wlr_output,
 		pixman_region32_t *output_damage, struct wlr_texture *texture,
 		const struct wlr_fbox *src_box, const struct wlr_box *dst_box,
-		const float matrix[static 9], float alpha) {
-	struct wlr_renderer *renderer = wlr_output->renderer;
+		const float matrix[static 9], struct decoration_data deco_data) {
 	struct sway_output *output = wlr_output->data;
+	struct fx_renderer *renderer = output->server->renderer;
 
 	pixman_region32_t damage;
 	pixman_region32_init(&damage);
@@ -119,9 +132,10 @@ static void render_texture(struct wlr_output *wlr_output,
 		scissor_output(wlr_output, &rects[i]);
 		set_scale_filter(wlr_output, texture, output->scale_filter);
 		if (src_box != NULL) {
-			wlr_render_subtexture_with_matrix(renderer, texture, src_box, matrix, alpha);
+			fx_render_subtexture_with_matrix(renderer, texture, src_box, dst_box,
+					matrix, deco_data);
 		} else {
-			wlr_render_texture_with_matrix(renderer, texture, matrix, alpha);
+			fx_render_texture_with_matrix(renderer, texture, dst_box, matrix, deco_data);
 		}
 	}
 
@@ -162,8 +176,9 @@ static void render_surface_iterator(struct sway_output *output,
 	}
 	scale_box(&dst_box, wlr_output->scale);
 
-	render_texture(wlr_output, output_damage, texture,
-		&src_box, &dst_box, matrix, alpha);
+	data->deco_data.corner_radius *= wlr_output->scale;
+	render_texture(wlr_output, output_damage, texture, &src_box, &dst_box,
+		matrix, data->deco_data);
 
 	wlr_presentation_surface_sampled_on_output(server.presentation, surface,
 		wlr_output);
@@ -173,7 +188,7 @@ static void render_layer_toplevel(struct sway_output *output,
 		pixman_region32_t *damage, struct wl_list *layer_surfaces) {
 	struct render_data data = {
 		.damage = damage,
-		.alpha = 1.0f,
+		.deco_data = get_undecorated_decoration_data(),
 	};
 	output_layer_for_each_toplevel_surface(output, layer_surfaces,
 		render_surface_iterator, &data);
@@ -183,7 +198,7 @@ static void render_layer_popups(struct sway_output *output,
 		pixman_region32_t *damage, struct wl_list *layer_surfaces) {
 	struct render_data data = {
 		.damage = damage,
-		.alpha = 1.0f,
+		.deco_data = get_undecorated_decoration_data(),
 	};
 	output_layer_for_each_popup_surface(output, layer_surfaces,
 		render_surface_iterator, &data);
@@ -194,7 +209,7 @@ static void render_unmanaged(struct sway_output *output,
 		pixman_region32_t *damage, struct wl_list *unmanaged) {
 	struct render_data data = {
 		.damage = damage,
-		.alpha = 1.0f,
+		.deco_data = get_undecorated_decoration_data(),
 	};
 	output_unmanaged_for_each_surface(output, unmanaged,
 		render_surface_iterator, &data);
@@ -205,7 +220,7 @@ static void render_drag_icons(struct sway_output *output,
 		pixman_region32_t *damage, struct wl_list *drag_icons) {
 	struct render_data data = {
 		.damage = damage,
-		.alpha = 1.0f,
+		.deco_data = get_undecorated_decoration_data(),
 	};
 	output_drag_icons_for_each_surface(output, drag_icons,
 		render_surface_iterator, &data);
@@ -217,7 +232,39 @@ void render_rect(struct sway_output *output,
 		pixman_region32_t *output_damage, const struct wlr_box *_box,
 		float color[static 4]) {
 	struct wlr_output *wlr_output = output->wlr_output;
-	struct wlr_renderer *renderer = wlr_output->renderer;
+	struct fx_renderer *renderer = output->server->renderer;
+	
+	struct wlr_box box;
+	memcpy(&box, _box, sizeof(struct wlr_box));
+	box.x -= output->lx * wlr_output->scale;
+	box.y -= output->ly * wlr_output->scale;
+
+	pixman_region32_t damage;
+	pixman_region32_init(&damage);
+	pixman_region32_union_rect(&damage, &damage, box.x, box.y,
+		box.width, box.height);
+	pixman_region32_intersect(&damage, &damage, output_damage);
+	bool damaged = pixman_region32_not_empty(&damage);
+	if (!damaged) {
+		goto damage_finish;
+	}
+
+	int nrects;
+	pixman_box32_t *rects = pixman_region32_rectangles(&damage, &nrects);
+	for (int i = 0; i < nrects; ++i) {
+		scissor_output(wlr_output, &rects[i]);
+		fx_render_rect(renderer, &box, color, wlr_output->transform_matrix);
+	}
+
+damage_finish:
+	pixman_region32_fini(&damage);
+}
+
+void render_rounded_rect(struct sway_output *output, pixman_region32_t *output_damage,
+		const struct wlr_box *_box, float color[static 4], int corner_radius,
+		enum corner_location corner_location) {
+	struct wlr_output *wlr_output = output->wlr_output;
+	struct fx_renderer *renderer = output->server->renderer;
 
 	struct wlr_box box;
 	memcpy(&box, _box, sizeof(struct wlr_box));
@@ -238,8 +285,43 @@ void render_rect(struct sway_output *output,
 	pixman_box32_t *rects = pixman_region32_rectangles(&damage, &nrects);
 	for (int i = 0; i < nrects; ++i) {
 		scissor_output(wlr_output, &rects[i]);
-		wlr_render_rect(renderer, &box, color,
-			wlr_output->transform_matrix);
+		fx_render_rounded_rect(renderer, &box, color, wlr_output->transform_matrix,
+				corner_radius, corner_location);
+	}
+
+damage_finish:
+	pixman_region32_fini(&damage);
+}
+
+// _box.x and .y are expected to be layout-local
+// _box.width and .height are expected to be output-buffer-local
+void render_border_corner(struct sway_output *output, pixman_region32_t *output_damage,
+		const struct wlr_box *_box, const float color[static 4], int corner_radius,
+		int border_thickness, enum corner_location corner_location) {
+	struct wlr_output *wlr_output = output->wlr_output;
+	struct fx_renderer *renderer = output->server->renderer;
+
+	struct wlr_box box;
+	memcpy(&box, _box, sizeof(struct wlr_box));
+	box.x -= output->lx * wlr_output->scale;
+	box.y -= output->ly * wlr_output->scale;
+
+	pixman_region32_t damage;
+	pixman_region32_init(&damage);
+	pixman_region32_union_rect(&damage, &damage, box.x, box.y,
+		box.width, box.height);
+	pixman_region32_intersect(&damage, &damage, output_damage);
+	bool damaged = pixman_region32_not_empty(&damage);
+	if (!damaged) {
+		goto damage_finish;
+	}
+
+	int nrects;
+	pixman_box32_t *rects = pixman_region32_rectangles(&damage, &nrects);
+	for (int i = 0; i < nrects; ++i) {
+		scissor_output(wlr_output, &rects[i]);
+		fx_render_border_corner(renderer, &box, color, wlr_output->transform_matrix,
+				corner_location, corner_radius, border_thickness);
 	}
 
 damage_finish:
@@ -253,11 +335,11 @@ void premultiply_alpha(float color[4], float opacity) {
 	color[2] *= color[3];
 }
 
-static void render_view_toplevels(struct sway_view *view,
-		struct sway_output *output, pixman_region32_t *damage, float alpha) {
+static void render_view_toplevels(struct sway_view *view, struct sway_output *output,
+		pixman_region32_t *damage, struct decoration_data deco_data) {
 	struct render_data data = {
 		.damage = damage,
-		.alpha = alpha,
+		.deco_data = deco_data,
 	};
 	struct wlr_box clip_box;
 	if (!container_is_current_floating(view->container)) {
@@ -276,18 +358,18 @@ static void render_view_toplevels(struct sway_view *view,
 			render_surface_iterator, &data);
 }
 
-static void render_view_popups(struct sway_view *view,
-		struct sway_output *output, pixman_region32_t *damage, float alpha) {
+static void render_view_popups(struct sway_view *view, struct sway_output *output,
+		pixman_region32_t *damage, struct decoration_data deco_data) {
 	struct render_data data = {
 		.damage = damage,
-		.alpha = alpha,
+		.deco_data = deco_data,
 	};
 	output_view_for_each_popup_surface(output, view,
 		render_surface_iterator, &data);
 }
 
-static void render_saved_view(struct sway_view *view,
-		struct sway_output *output, pixman_region32_t *damage, float alpha) {
+static void render_saved_view(struct sway_view *view, struct sway_output *output,
+		pixman_region32_t *damage, struct decoration_data deco_data) {
 	struct wlr_output *wlr_output = output->wlr_output;
 
 	if (wl_list_empty(&view->saved_buffers)) {
@@ -337,9 +419,9 @@ static void render_saved_view(struct sway_view *view,
 					(saved_buf->y - view->container->current.content_y) + view->saved_geometry.y);
 		}
 		scale_box(&dst_box, wlr_output->scale);
-
+		deco_data.corner_radius *= wlr_output->scale;
 		render_texture(wlr_output, damage, saved_buf->buffer->texture,
-			&saved_buf->source_box, &dst_box, matrix, alpha);
+			&saved_buf->source_box, &dst_box, matrix, deco_data);
 	}
 
 	// FIXME: we should set the surface that this saved buffer originates from
@@ -351,12 +433,13 @@ static void render_saved_view(struct sway_view *view,
  * Render a view's surface and left/bottom/right borders.
  */
 static void render_view(struct sway_output *output, pixman_region32_t *damage,
-		struct sway_container *con, struct border_colors *colors) {
+		struct sway_container *con, struct border_colors *colors,
+		struct decoration_data deco_data) {
 	struct sway_view *view = con->view;
 	if (!wl_list_empty(&view->saved_buffers)) {
-		render_saved_view(view, output, damage, view->container->alpha);
+		render_saved_view(view, output, damage, deco_data);
 	} else if (view->surface) {
-		render_view_toplevels(view, output, damage, view->container->alpha);
+		render_view_toplevels(view, output, damage, deco_data);
 	}
 
 	if (con->current.border == B_NONE || con->current.border == B_CSD) {
@@ -370,11 +453,19 @@ static void render_view(struct sway_output *output, pixman_region32_t *damage,
 
 	if (state->border_left) {
 		memcpy(&color, colors->child_border, sizeof(float) * 4);
-		premultiply_alpha(color, con->alpha);
+		premultiply_alpha(color, deco_data.alpha);
 		box.x = floor(state->x);
 		box.y = floor(state->content_y);
 		box.width = state->border_thickness;
 		box.height = state->content_height;
+		if (deco_data.corner_radius) {
+			if (!deco_data.has_titlebar) {
+				box.y += deco_data.corner_radius;
+				box.height -= 2 * deco_data.corner_radius;
+			} else {
+				box.height -= deco_data.corner_radius;
+			}
+		}
 		scale_box(&box, output_scale);
 		render_rect(output, damage, &box, color);
 	}
@@ -389,11 +480,20 @@ static void render_view(struct sway_output *output, pixman_region32_t *damage,
 		} else {
 			memcpy(&color, colors->child_border, sizeof(float) * 4);
 		}
-		premultiply_alpha(color, con->alpha);
+		premultiply_alpha(color, deco_data.alpha);
 		box.x = floor(state->content_x + state->content_width);
 		box.y = floor(state->content_y);
 		box.width = state->border_thickness;
 		box.height = state->content_height;
+		// adjust sizing for rounded border corners
+		if (deco_data.corner_radius) {
+			if (!deco_data.has_titlebar) {
+				box.y += deco_data.corner_radius;
+				box.height -= 2 * deco_data.corner_radius;
+			} else {
+				box.height -= deco_data.corner_radius;
+			}
+		}
 		scale_box(&box, output_scale);
 		render_rect(output, damage, &box, color);
 	}
@@ -404,13 +504,43 @@ static void render_view(struct sway_output *output, pixman_region32_t *damage,
 		} else {
 			memcpy(&color, colors->child_border, sizeof(float) * 4);
 		}
-		premultiply_alpha(color, con->alpha);
+		premultiply_alpha(color, deco_data.alpha);
 		box.x = floor(state->x);
 		box.y = floor(state->content_y + state->content_height);
 		box.width = state->width;
 		box.height = state->border_thickness;
+		// adjust sizing for rounded border corners
+		if (deco_data.corner_radius) {
+			box.x += deco_data.corner_radius;
+			box.width -= 2 * deco_data.corner_radius;
+		}
 		scale_box(&box, output_scale);
 		render_rect(output, damage, &box, color);
+		
+		// rounded bottom left & bottom right border corners
+		if (deco_data.corner_radius) {
+			int size = 2 * (deco_data.corner_radius + state->border_thickness);
+			int scaled_thickness = state->border_thickness * output_scale;
+			int scaled_corner_radius = deco_data.corner_radius * output_scale;
+			if (state->border_left) {
+				box.width = size;
+				box.height = size;
+				box.x = floor(state->x);
+				box.y = floor(state->y + state->height - size);
+				scale_box(&box, output_scale);
+				render_border_corner(output, damage, &box, color,
+						scaled_corner_radius, scaled_thickness, BOTTOM_LEFT);
+			}
+			if (state->border_right) {
+				box.width = size;
+				box.height = size;
+				box.x = floor(state->x + state->width - size);
+				box.y = floor(state->y + state->height - size);
+				scale_box(&box, output_scale);
+				render_border_corner(output, damage, &box, color,
+						scaled_corner_radius, scaled_thickness, BOTTOM_RIGHT);
+			}
+		}
 	}
 }
 
@@ -424,10 +554,9 @@ static void render_view(struct sway_output *output, pixman_region32_t *damage,
  * The left side is: 1px border, 2px padding, title
  */
 static void render_titlebar(struct sway_output *output,
-		pixman_region32_t *output_damage, struct sway_container *con,
-		int x, int y, int width,
-		struct border_colors *colors, struct wlr_texture *title_texture,
-		struct wlr_texture *marks_texture) {
+		pixman_region32_t *output_damage, struct sway_container *con, int x, int y,
+		int width, struct border_colors *colors, float alpha, int corner_radius,
+		struct wlr_texture *title_texture, struct wlr_texture *marks_texture) {
 	struct wlr_box box;
 	float color[4];
 	float output_scale = output->wlr_output->scale;
@@ -441,9 +570,11 @@ static void render_titlebar(struct sway_output *output,
 	// Single pixel bar above title
 	memcpy(&color, colors->border, sizeof(float) * 4);
 	premultiply_alpha(color, con->alpha);
-	box.x = x;
+	premultiply_alpha(color, alpha);
+	box.x = corner_radius ? x + corner_radius : x + titlebar_border_thickness;
 	box.y = y;
-	box.width = width;
+	box.width = corner_radius ?
+		width - corner_radius * 2 : width - titlebar_border_thickness * 2;
 	box.height = titlebar_border_thickness;
 	scale_box(&box, output_scale);
 	render_rect(output, output_damage, &box, color);
@@ -456,22 +587,43 @@ static void render_titlebar(struct sway_output *output,
 	scale_box(&box, output_scale);
 	render_rect(output, output_damage, &box, color);
 
-	// Single pixel left edge
+	// Single pixel bar left edge
 	box.x = x;
-	box.y = y + titlebar_border_thickness;
+	box.y = y + corner_radius;
 	box.width = titlebar_border_thickness;
-	box.height = container_titlebar_height() - titlebar_border_thickness * 2;
+	box.height = container_titlebar_height() - titlebar_border_thickness - corner_radius;
 	scale_box(&box, output_scale);
 	render_rect(output, output_damage, &box, color);
 
-	// Single pixel right edge
+	// Single pixel bar right edge
 	box.x = x + width - titlebar_border_thickness;
-	box.y = y + titlebar_border_thickness;
+	box.y = y + corner_radius;
 	box.width = titlebar_border_thickness;
-	box.height = container_titlebar_height() - titlebar_border_thickness * 2;
+	box.height = container_titlebar_height() - titlebar_border_thickness - corner_radius;
 	scale_box(&box, output_scale);
 	render_rect(output, output_damage, &box, color);
+	
+	// if corner_radius: single pixel corners
+	if (corner_radius) {
+		// left corner
+		box.x = x;
+		box.y = y;
+		box.width = corner_radius * 2;
+		box.height = corner_radius * 2;
+		scale_box(&box, output_scale);
+		render_border_corner(output, output_damage, &box, color,
+			corner_radius, titlebar_border_thickness, TOP_LEFT);
 
+		// right corner
+		box.x = x + width - corner_radius * 2;
+		box.y = y;
+		box.width = corner_radius * 2;
+		box.height = corner_radius * 2;
+		scale_box(&box, output_scale);
+		render_border_corner(output, output_damage, &box, color,
+			corner_radius, titlebar_border_thickness, TOP_RIGHT);
+	}
+	
 	int inner_x = x - output_x + titlebar_h_padding;
 	int bg_y = y + titlebar_border_thickness;
 	size_t inner_width = width - titlebar_h_padding * 2;
@@ -483,6 +635,10 @@ static void render_titlebar(struct sway_output *output,
 			(titlebar_v_padding - titlebar_border_thickness) * 2 +
 			config->font_height, bg_y, output_scale);
 
+	// title marks textures should have no eyecandy
+	struct decoration_data deco_data = get_undecorated_decoration_data();
+	deco_data.alpha = alpha;
+	
 	// Marks
 	int ob_marks_x = 0; // output-buffer-local
 	int ob_marks_width = 0; // output-buffer-local
@@ -520,11 +676,11 @@ static void render_titlebar(struct sway_output *output,
 			texture_box.width = ob_inner_width;
 		}
 		render_texture(output->wlr_output, output_damage, marks_texture,
-			NULL, &texture_box, matrix, con->alpha);
+			NULL, &texture_box, matrix, deco_data);
 
 		// Padding above
 		memcpy(&color, colors->background, sizeof(float) * 4);
-		premultiply_alpha(color, con->alpha);
+		premultiply_alpha(color, alpha);
 		box.x = texture_box.x + round(output_x * output_scale);
 		box.y = round((y + titlebar_border_thickness) * output_scale);
 		box.width = texture_box.width;
@@ -596,7 +752,7 @@ static void render_titlebar(struct sway_output *output,
 		}
 
 		render_texture(output->wlr_output, output_damage, title_texture,
-			NULL, &texture_box, matrix, con->alpha);
+			NULL, &texture_box, matrix, deco_data);
 
 		// Padding above
 		memcpy(&color, colors->background, sizeof(float) * 4);
@@ -658,7 +814,11 @@ static void render_titlebar(struct sway_output *output,
 	if (box.x + box.width < left_x) {
 		box.width += left_x - box.x - box.width;
 	}
-	render_rect(output, output_damage, &box, color);
+	if (corner_radius) {
+		render_rounded_rect(output, output_damage, &box, color, corner_radius, TOP_LEFT);
+	} else {
+		render_rect(output, output_damage, &box, color);
+	}
 
 	// Padding on right side
 	box.x = x + width - titlebar_h_padding;
@@ -672,16 +832,19 @@ static void render_titlebar(struct sway_output *output,
 		box.width += box.x - right_rx;
 		box.x = right_rx;
 	}
-	render_rect(output, output_damage, &box, color);
+	if (corner_radius) {
+		render_rounded_rect(output, output_damage, &box, color, corner_radius, TOP_RIGHT);
+	} else {
+		render_rect(output, output_damage, &box, color);
+	}
 }
 
 /**
  * Render the top border line for a view using "border pixel".
  */
 static void render_top_border(struct sway_output *output,
-		pixman_region32_t *output_damage, struct sway_container *con,
-		struct border_colors *colors) {
-	struct sway_container_state *state = &con->current;
+		pixman_region32_t *output_damage, struct sway_container_state *state,
+		struct border_colors *colors, float alpha, int corner_radius) {
 	if (!state->border_top) {
 		return;
 	}
@@ -691,13 +854,45 @@ static void render_top_border(struct sway_output *output,
 
 	// Child border - top edge
 	memcpy(&color, colors->child_border, sizeof(float) * 4);
-	premultiply_alpha(color, con->alpha);
+	premultiply_alpha(color, alpha);
 	box.x = floor(state->x);
 	box.y = floor(state->y);
 	box.width = state->width;
 	box.height = state->border_thickness;
+	// adjust sizing for rounded border corners
+	if (corner_radius) {
+		box.x += corner_radius;
+		box.width -= 2 * corner_radius;
+	}
 	scale_box(&box, output_scale);
 	render_rect(output, output_damage, &box, color);
+	// render rounded top corner borders if corner_radius is set > 0
+	if (corner_radius) {
+		int size = 2 * (corner_radius + state->border_thickness);
+		int scaled_thickness = state->border_thickness * output_scale;
+		int scaled_corner_radius = corner_radius * output_scale;
+
+		// top left
+		if (state->border_left) {
+			box.width = size;
+			box.height = size;
+			box.x = floor(state->x);
+			box.y = floor(state->y);
+			scale_box(&box, output_scale);
+			render_border_corner(output, output_damage, &box, color,
+					scaled_corner_radius, scaled_thickness, TOP_LEFT);
+		}
+		// top right
+		if (state->border_right) {
+			box.width = size;
+			box.height = size;
+			box.x = floor(state->x + state->width - size);
+			box.y = floor(state->y);
+			scale_box(&box, output_scale);
+			render_border_corner(output, output_damage, &box, color,
+					scaled_corner_radius, scaled_thickness, TOP_RIGHT);
+		}
+	}
 }
 
 struct parent_data {
@@ -747,14 +942,23 @@ static void render_containers_linear(struct sway_output *output,
 				marks_texture = child->marks_unfocused;
 			}
 
-			if (state->border == B_NORMAL) {
-				render_titlebar(output, damage, child, floor(state->x),
-						floor(state->y), state->width, colors,
+			bool has_titlebar = state->border == B_NORMAL;
+			struct decoration_data deco_data = {
+				.alpha = child->alpha,
+				// no corner radius if smart gaps are on and only visible view
+				.corner_radius = config->smart_gaps == SMART_GAPS_ON &&
+					view_ancestor_is_only_visible(view) ? 0 : child->corner_radius,
+				.saturation = child->saturation,
+				.has_titlebar = has_titlebar,
+			};
+			render_view(output, damage, child, colors, deco_data);
+			if (has_titlebar) {
+				render_titlebar(output, damage, child, floor(state->x), floor(state->y),
+						state->width, colors, deco_data.alpha, deco_data.corner_radius,
 						title_texture, marks_texture);
 			} else if (state->border == B_PIXEL) {
-				render_top_border(output, damage, child, colors);
+				render_top_border(output, damage, state, colors, deco_data.alpha, deco_data.corner_radius);
 			}
-			render_view(output, damage, child, colors);
 		} else {
 			render_container(output, damage, child,
 					parent->focused || child->current.focused);
@@ -822,8 +1026,8 @@ static void render_containers_tabbed(struct sway_output *output,
 			tab_width = parent->box.width - tab_width * i;
 		}
 
-		render_titlebar(output, damage, child, x, parent->box.y, tab_width,
-				colors, title_texture, marks_texture);
+		render_titlebar(output, damage, child, x, parent->box.y, tab_width, colors,
+				child->alpha, child->corner_radius, title_texture, marks_texture);
 
 		if (child == current) {
 			current_colors = colors;
@@ -832,7 +1036,13 @@ static void render_containers_tabbed(struct sway_output *output,
 
 	// Render surface and left/right/bottom borders
 	if (current->view) {
-		render_view(output, damage, current, current_colors);
+		struct decoration_data deco_data = {
+			.alpha = current->alpha,
+			.corner_radius = current->corner_radius,
+			.saturation = current->saturation,
+			.has_titlebar = true,
+		};
+		render_view(output, damage, current, current_colors, deco_data);
 	} else {
 		render_container(output, damage, current,
 				parent->focused || current->current.focused);
@@ -885,8 +1095,8 @@ static void render_containers_stacked(struct sway_output *output,
 		}
 
 		int y = parent->box.y + titlebar_height * i;
-		render_titlebar(output, damage, child, parent->box.x, y,
-				parent->box.width, colors, title_texture, marks_texture);
+		render_titlebar(output, damage, child, parent->box.x, y, parent->box.width,
+				colors, child->alpha, child->corner_radius, title_texture, marks_texture);
 
 		if (child == current) {
 			current_colors = colors;
@@ -895,7 +1105,13 @@ static void render_containers_stacked(struct sway_output *output,
 
 	// Render surface and left/right/bottom borders
 	if (current->view) {
-		render_view(output, damage, current, current_colors);
+		struct decoration_data deco_data = {
+			.alpha = current->alpha,
+			.saturation = current->saturation,
+			.corner_radius = current->corner_radius,
+			.has_titlebar = true,
+		};
+		render_view(output, damage, current, current_colors, deco_data);
 	} else {
 		render_container(output, damage, current,
 				parent->focused || current->current.focused);
@@ -963,6 +1179,7 @@ static void render_workspace(struct sway_output *output,
 
 static void render_floating_container(struct sway_output *soutput,
 		pixman_region32_t *damage, struct sway_container *con) {
+	struct sway_container_state *state = &con->current;
 	if (con->view) {
 		struct sway_view *view = con->view;
 		struct border_colors *colors;
@@ -973,7 +1190,7 @@ static void render_floating_container(struct sway_output *soutput,
 			colors = con->border_colors.urgent;
 			title_texture = con->title_urgent;
 			marks_texture = con->marks_urgent;
-		} else if (con->current.focused) {
+		} else if (state->focused) {
 			colors = con->border_colors.focused;
 			title_texture = con->title_focused;
 			marks_texture = con->marks_focused;
@@ -984,15 +1201,23 @@ static void render_floating_container(struct sway_output *soutput,
 		}
 
 		if (con->current.border == B_NORMAL) {
-			render_titlebar(soutput, damage, con, floor(con->current.x),
-					floor(con->current.y), con->current.width, colors,
+			bool has_titlebar = state->border == B_NORMAL;
+		struct decoration_data deco_data = {
+			.alpha = con->alpha,
+			.saturation = con->saturation,
+			.corner_radius = con->corner_radius,
+			.has_titlebar = has_titlebar,
+		};
+		render_view(soutput, damage, con, colors, deco_data);
+		if (has_titlebar) {
+			render_titlebar(soutput, damage, con, floor(state->x), floor(state->y),
+					state->width, colors, deco_data.alpha, deco_data.corner_radius,
 					title_texture, marks_texture);
-		} else if (con->current.border == B_PIXEL) {
-			render_top_border(soutput, damage, con, colors);
+		} else if (state->border == B_PIXEL) {
+			render_top_border(soutput, damage, state, colors, deco_data.alpha, deco_data.corner_radius);
 		}
-		render_view(soutput, damage, con, colors);
 	} else {
-		render_container(soutput, damage, con, con->current.focused);
+		render_container(soutput, damage, con, state->focused);
 	}
 }
 
@@ -1027,7 +1252,7 @@ static void render_seatops(struct sway_output *output,
 void output_render(struct sway_output *output, struct timespec *when,
 		pixman_region32_t *damage) {
 	struct wlr_output *wlr_output = output->wlr_output;
-	struct wlr_renderer *renderer = output->server->renderer;
+	struct fx_renderer *renderer = output->server->renderer;
 
 	struct sway_workspace *workspace = output->current.active_workspace;
 	if (workspace == NULL) {
@@ -1039,8 +1264,8 @@ void output_render(struct sway_output *output, struct timespec *when,
 		fullscreen_con = workspace->current.fullscreen;
 	}
 
-	wlr_renderer_begin(renderer, wlr_output->width, wlr_output->height);
-
+	fx_renderer_begin(renderer, wlr_output->width, wlr_output->height);
+	
 	if (debug.damage == DAMAGE_RERENDER) {
 		int width, height;
 		wlr_output_transformed_resolution(wlr_output, &width, &height);
@@ -1053,7 +1278,7 @@ void output_render(struct sway_output *output, struct timespec *when,
 	}
 
 	if (debug.damage == DAMAGE_HIGHLIGHT) {
-		wlr_renderer_clear(renderer, (float[]){1, 1, 0, 1});
+		fx_renderer_clear((float[]){1, 1, 0, 1});
 	}
 
 	if (output_has_opaque_overlay_layer_surface(output)) {
@@ -1067,15 +1292,16 @@ void output_render(struct sway_output *output, struct timespec *when,
 		pixman_box32_t *rects = pixman_region32_rectangles(damage, &nrects);
 		for (int i = 0; i < nrects; ++i) {
 			scissor_output(wlr_output, &rects[i]);
-			wlr_renderer_clear(renderer, clear_color);
+			fx_renderer_clear(clear_color);
 		}
 
 		if (fullscreen_con->view) {
+			struct decoration_data deco_data = get_undecorated_decoration_data();
+			deco_data.saturation = fullscreen_con->saturation;
 			if (!wl_list_empty(&fullscreen_con->view->saved_buffers)) {
-				render_saved_view(fullscreen_con->view, output, damage, 1.0f);
+				render_saved_view(fullscreen_con->view, output, damage, deco_data);
 			} else if (fullscreen_con->view->surface) {
-				render_view_toplevels(fullscreen_con->view,
-						output, damage, 1.0f);
+				render_view_toplevels(fullscreen_con->view, output, damage, deco_data);
 			}
 		} else {
 			render_container(output, damage, fullscreen_con,
@@ -1099,7 +1325,7 @@ void output_render(struct sway_output *output, struct timespec *when,
 		pixman_box32_t *rects = pixman_region32_rectangles(damage, &nrects);
 		for (int i = 0; i < nrects; ++i) {
 			scissor_output(wlr_output, &rects[i]);
-			wlr_renderer_clear(renderer, clear_color);
+			fx_renderer_clear(clear_color);
 		}
 
 		render_layer_toplevel(output, damage,
@@ -1128,7 +1354,13 @@ void output_render(struct sway_output *output, struct timespec *when,
 	struct sway_seat *seat = input_manager_current_seat();
 	struct sway_container *focus = seat_get_focused_container(seat);
 	if (focus && focus->view) {
-		render_view_popups(focus->view, output, damage, focus->alpha);
+		struct decoration_data deco_data = {
+			.alpha = focus->alpha,
+			.corner_radius = focus->corner_radius,
+			.saturation = focus->saturation,
+			.has_titlebar = focus->current.border == B_NORMAL,
+		};
+		render_view_popups(focus->view, output, damage, deco_data);
 	}
 
 render_overlay:
@@ -1139,9 +1371,11 @@ render_overlay:
 	render_drag_icons(output, damage, &root->drag_icons);
 
 renderer_end:
-	wlr_renderer_scissor(renderer, NULL);
+	fx_renderer_scissor(NULL);
+	wlr_renderer_begin(output->server->wlr_renderer, wlr_output->width, wlr_output->height);
 	wlr_output_render_software_cursors(wlr_output, damage);
-	wlr_renderer_end(renderer);
+	wlr_renderer_end(output->server->wlr_renderer);
+	fx_renderer_end();
 
 	int width, height;
 	wlr_output_transformed_resolution(wlr_output, &width, &height);

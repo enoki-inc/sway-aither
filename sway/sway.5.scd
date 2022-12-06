@@ -585,6 +585,9 @@ The default colors are:
 :  #000000
 :  #0c0c0c
 
+*corner_radius* <radius>
+	Set corner radius for new windows.
+	
 	When run on containers, e.g. from *bindsym* or *for_window*, only those
 	containers are reconfigured. Subcommand _global_ can be used to
 	explicitly address the global configuration in this case and _default_
@@ -665,7 +668,9 @@ The default colors are:
 	padding of the text while _vertical_ value affects vertical padding (space
 	above and below text). Padding includes titlebar borders so their value
 	should be greater than titlebar_border_thickness. If _vertical_ value is
-	not specified it is set to the _horizontal_ value.
+	not specified it is set to the _horizontal_ value. If _corner_radius_ is set
+	to be greater than the _horizontal_ or _vertical_ value, the value will be
+	treated as that of _corner_radius_.
 
 *for_window* <criteria> <command>
 	Whenever a window that matches _criteria_ appears, run list of commands.
@@ -767,6 +772,11 @@ The default colors are:
 	Adjusts the opacity of the window between 0 (completely transparent) and
 	1 (completely opaque). If the operation is omitted, _set_ will be used.
 
+*saturation* [set|plus|minus] <value>
+	Adjusts the saturation (Digital Vibrance) of the window between 0 (black and
+	white) and 2 (over saturated which is suited for some FPS games) while 1 is
+	the default saturation. If the operation is omitted, _set_ will be used.
+	
 *tiling_drag*  enable|disable|toggle
 	Sets whether or not tiling containers can be dragged with the mouse. If
 	_enabled_ (default), the _floating_mod_ can be used to drag tiling, as well

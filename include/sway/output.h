@@ -5,6 +5,7 @@
 #include <wayland-server-core.h>
 #include <wlr/types/wlr_output.h>
 #include "config.h"
+#include "sway/desktop/fx_renderer.h"
 #include "sway/tree/node.h"
 #include "sway/tree/view.h"
 
@@ -162,6 +163,12 @@ void render_rect(struct sway_output *output,
 		pixman_region32_t *output_damage, const struct wlr_box *_box,
 		float color[static 4]);
 
+void render_rounded_rect(struct sway_output *output,
+		pixman_region32_t *output_damage, const struct wlr_box *_box,
+		float color[static 4], int corner_radius,
+		enum corner_location corner_location);
+		
+		
 void premultiply_alpha(float color[4], float opacity);
 
 void scale_box(struct wlr_box *box, float scale);

@@ -458,6 +458,8 @@ enum xwayland_mode {
  * The configuration struct. The result of loading a config file.
  */
 struct sway_config {
+	// SwayFX config options
+	int corner_radius;
 	char *swaynag_command;
 	struct swaynag_instance swaynag_config_errors;
 	list_t *symbols;

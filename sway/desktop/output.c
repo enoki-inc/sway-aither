@@ -31,6 +31,7 @@
 #include "sway/tree/root.h"
 #include "sway/tree/view.h"
 #include "sway/tree/workspace.h"
+#include "sway/desktop/fx_renderer.h"
 
 struct sway_output *output_by_name_or_id(const char *name_or_id) {
 	for (int i = 0; i < root->outputs->length; ++i) {
@@ -508,7 +509,9 @@ static int output_repaint_timer_handler(void *data) {
 		fullscreen_con = workspace->current.fullscreen;
 	}
 
-	if (fullscreen_con && fullscreen_con->view && !debug.noscanout) {
+	if (fullscreen_con && fullscreen_con->view && !debug.noscanout
+			// Only output to monitor without compositing when saturation is changed
+			&& fullscreen_con->saturation == 1.0f) {
 		// Try to scan-out the fullscreen view
 		static bool last_scanned_out = false;
 		bool scanned_out =
@@ -867,7 +870,7 @@ void handle_new_output(struct wl_listener *listener, void *data) {
 	}
 
 	if (!wlr_output_init_render(wlr_output, server->allocator,
-			server->renderer)) {
+			server->wlr_renderer)) {
 		sway_log(SWAY_ERROR, "Failed to init output render");
 		return;
 	}

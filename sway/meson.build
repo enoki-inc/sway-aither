@@ -12,6 +12,7 @@ sway_sources = files(
 	'xdg_decoration.c',
 
 	'desktop/desktop.c',
+    'desktop/fx_renderer.c',
 	'desktop/idle_inhibit_v1.c',
 	'desktop/layer_shell.c',
 	'desktop/output.c',
@@ -45,6 +46,7 @@ sway_sources = files(
 	'commands/bind.c',
 	'commands/border.c',
 	'commands/client.c',
+    'commands/corner_radius.c',
 	'commands/create_output.c',
 	'commands/default_border.c',
 	'commands/default_floating_border.c',
@@ -71,6 +73,7 @@ sway_sources = files(
 	'commands/mark.c',
 	'commands/max_render_time.c',
 	'commands/opacity.c',
+    'commands/saturation.c',
 	'commands/include.c',
 	'commands/input.c',
 	'commands/layout.c',
@@ -204,6 +207,8 @@ sway_sources = files(
 	'tree/output.c',
 )
 
+subdir('desktop/shaders')
+
 sway_deps = [
 	cairo,
 	drm,
@@ -220,6 +225,7 @@ sway_deps = [
 	wayland_server,
 	wlroots,
 	xkbcommon,
+	egl,
 ]
 
 if have_xwayland
